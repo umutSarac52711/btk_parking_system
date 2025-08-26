@@ -3,95 +3,101 @@ import numpy as np
 
 def find_license_plate(image):
     """
-    This function takes an image and tries to find the license plate contour.
+    This function takes an image and finds the license plate,
+    returning all intermediate images for debugging.
     """
-    
-    # --- 1. PREPROCESSING ---
+    # Create a dictionary to store our intermediate images.
+    debug_images = {}
 
-    # Convert the image to grayscale.
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # It's good practice to work on a copy.
+    img_copy = image.copy()
+    debug_images['original'] = img_copy
 
-    # Apply a bilateral filter. This is an advanced blur that is very good at
-    # reducing noise while keeping edges sharp.
-    # The parameters are: diameter of the pixel neighborhood, color sigma, and space sigma.
-    # You don't need to master these parameters, just know they help in noise reduction.
+    # 1. PREPROCESSING
+    gray = cv2.cvtColor(img_copy, cv2.COLOR_BGR2GRAY)
+    debug_images['grayscale'] = gray
+
     filtered = cv2.bilateralFilter(gray, 11, 17, 17)
+    debug_images['filtered'] = filtered
 
-    # --- 2. EDGE DETECTION ---
-
-    # Use the Canny edge detector to find the edges in the image.
-    # The two numbers are the lower and upper thresholds. Any gradient between
-    # these two values is considered an edge. A common starting ratio is 1:2 or 1:3.
+    # 2. EDGE DETECTION
     edged = cv2.Canny(filtered, 30, 200)
+    debug_images['edged'] = edged
 
-    # --- 3. CONTOUR FINDING ---
-
-    # Find all the contours in the edged image.
-    # cv2.RETR_TREE retrieves all contours and reconstructs a full hierarchy of nested contours.
-    # cv2.CHAIN_APPROX_SIMPLE compresses horizontal, vertical, and diagonal segments and leaves only their end points.
+    # 3. CONTOUR FINDING
     contours, _ = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Sort the contours by area in descending order and keep the top 10.
-    # This is a performance optimization. We assume the license plate will be
-    # one of the larger contours in the image.
-    # 'key=cv2.contourArea' is a Python feature where we provide a function to be used for sorting.
+    # Create a blank image to draw contours on for visualization.
+    # The '3' means we want a 3-channel (color) image, so we can draw in color.
+    contour_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    # Sort contours and keep the top 10.
     contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
 
-    license_plate_contour = None # Initialize to None
+    # Draw all of the top 10 contours on our blank image in blue.
+    # This will show us what the algorithm is "considering".
+    cv2.drawContours(contour_image, contours, -1, (255, 0, 0), 2)
+    debug_images['all_contours'] = contour_image
 
-    # --- 4. FILTERING FOR THE PLATE ---
+    license_plate_contour = None
 
-    # Loop over our sorted contours.
+    # 4. FILTERING FOR THE PLATE
     for contour in contours:
-        # Approximate the contour shape to a simpler polygon.
-        # The second parameter (epsilon) is the maximum distance from the original
-        # contour to the approximated contour. It's a measure of "accuracy".
         perimeter = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, 0.018 * perimeter, True)
-
-        # Check if the approximated contour has 4 corners, which is a characteristic of a rectangle.
         if len(approx) == 4:
-            # If it has 4 corners, we assume we have found our license plate.
             license_plate_contour = approx
-            break # Exit the loop once we've found it.
+            break
 
-    return license_plate_contour
+    # The final dictionary to be returned.
+    results = {
+        "license_plate_contour": license_plate_contour,
+        "debug_images": debug_images
+    }
 
+    return results
 
 def main():
-    """
-    This is the main function of our script.
-    """
-    image_path = 'car_image.jpg'
-    print(f"Attempting to load image from: {image_path}")
-
+    image_path = 'car_image.jpg' # Change this to test different images!
+    print(f"Loading image: {image_path}")
     image = cv2.imread(image_path)
 
     if image is None:
-        print(f"Error: Could not read the image. Check if the file '{image_path}' exists.")
+        print(f"Error: Could not read image at '{image_path}'")
         return
 
-    # Call our new function to find the license plate.
-    plate_contour = find_license_plate(image)
+    # Call the function and get the results.
+    detection_results = find_license_plate(image)
+    plate_contour = detection_results["license_plate_contour"]
+    debug_views = detection_results["debug_images"]
 
-    # We need to handle the case where no plate was found.
+    # Create the final display image.
+    final_image = image.copy()
+
     if plate_contour is not None:
-        # If a contour was found, draw it on the original image.
-        # The arguments are: image to draw on, the contour(s) to draw (as a list),
-        # contour index (-1 means draw all), color (in BGR format - Blue, Green, Red), and thickness.
-        cv2.drawContours(image, [plate_contour], -1, (0, 255, 0), 3)
-        print("License plate detected!")
+        cv2.drawContours(final_image, [plate_contour], -1, (0, 255, 0), 3)
+        print("License plate DETECTED.")
     else:
-        print("Could not find a license plate contour.")
+        print("License plate NOT DETECTED.")
 
-    # Display the final image with the contour drawn on it.
-    cv2.imshow('Resulting Image', image)
+    # --- DISPLAYING ALL THE WINDOWS ---
 
-    print("Image displayed. Press any key to close the window.")
+    # Display each intermediate step in a separate, resizable window.
+    for name, img in debug_views.items():
+        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+        cv2.imshow(name, img)
+
+    # Also display the final result.
+    cv2.namedWindow("Final Result", cv2.WINDOW_NORMAL)
+    cv2.imshow("Final Result", final_image)
+
+    print("\nAll debug windows are displayed.")
+    print("Arrange them on your screen to see the pipeline.")
+    print("Press any key to close all windows.")
+
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-    print("Window closed. Program finished.")
-
+    print("Windows closed.")
 
 if __name__ == "__main__":
     main()
