@@ -3,54 +3,46 @@ import cv2
 import numpy as np
 import re
 
-# (Helper functions get_plate_patterns, calculate_area remain the same)
+# (Helper functions get_plate_patterns, is_valid_plate, calculate_area remain the same)
 def get_plate_patterns():
     patterns = [ r"^[A-Z0-9]{5,8}$", r"^\d{2}[A-Z]{1,3}\d{2,4}$" ]
     return patterns
 
-def calculate_area(bounding_box):
-    return cv2.contourArea(np.array(bounding_box, dtype=np.int32))
-
-# --- THE FIX #1: STRONGER VALIDATION LOGIC ---
 def is_valid_plate(text, patterns):
-    """
-    Checks if a text string matches a regex pattern AND has a mix of letters and digits.
-    """
-    # Rule 1: Must contain at least one digit and at least one letter.
     has_digit = any(char.isdigit() for char in text)
     has_letter = any(char.isalpha() for char in text)
-    if not (has_digit and has_letter) and len(text) > 4: # A short string like "NOV" is fine
+    if not (has_digit and has_letter) and len(text) > 4:
         return False
-
-    # Rule 2: Must match one of our regex patterns.
     for pattern in patterns:
         if re.match(pattern, text):
             return True
-            
     return False
 
-# --- THE FIX #2: NEW, MORE ROBUST PREPROCESSING ---
+def calculate_area(bounding_box):
+    return cv2.contourArea(np.array(bounding_box, dtype=np.int32))
+
+# --- THE FIX: NEW PREPROCESSING WITH CLAHE ---
 def preprocess_for_ocr(image):
     """
-    Preprocesses using a Blur -> Otsu Threshold pipeline, which is
-    excellent for separating foreground/background on non-flat surfaces.
+    Enhances the image for OCR using CLAHE (Contrast Limited Adaptive Histogram Equalization),
+    which improves local contrast while preserving a natural look.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 1. Create a CLAHE object.
+    # clipLimit: This is the threshold for contrast limiting. A value of 2.0 is standard.
+    # tileGridSize: Divides the image into an 8x8 grid for local processing.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+    # 2. Apply the CLAHE object to our grayscale image.
+    enhanced_gray = clahe.apply(gray)
     
-    # Apply a Gaussian blur to smooth out noise and harsh lighting gradients
-    # from the embossed letters. This is crucial for Otsu's method to work well.
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Use Otsu's Binarization. It automatically determines the best global
-    # threshold value to separate the two main colors in the image.
-    # We invert it to get white text on a black background.
-    _, preprocessed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    return preprocessed
+    return enhanced_gray
 
 
 def recognize_plate_two_pass(image_path):
-    # This function's structure is mostly the same, just calling the new helpers.
+    # This entire function remains the same as the last version.
+    # It will now just call our new and improved preprocess_for_ocr.
     image = cv2.imread(image_path)
     if image is None: return
 
@@ -75,11 +67,11 @@ def recognize_plate_two_pass(image_path):
         cropped_region = image[max(0, min_y-padding):min(image.shape[0], max_y+padding), max(0, min_x-padding):min(image.shape[1], max_x+padding)]
         if cropped_region.size == 0: continue
             
-        preprocessed_crop = preprocess_for_ocr(cropped_region)
+        preprocessed_crop = preprocess_for_ocr(cropped_region) # This now uses CLAHE
         window_name = f"Region #{i+1} Processed ('{text}')"
         debug_windows.append((window_name, preprocessed_crop))
 
-        pass2_results = reader.readtext(preprocessed_crop, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+        pass2_results = reader.readtext(preprocessed_crop, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ012356789') # Added 4 back
         
         if not pass2_results:
             print("  -> No text found after preprocessing.")
@@ -89,7 +81,6 @@ def recognize_plate_two_pass(image_path):
             cleaned_text = refined_text.upper().replace(" ", "")
             print(f"  -> Re-scanned and found: '{cleaned_text}'")
             
-            # Use our new, stronger validation function
             if is_valid_plate(cleaned_text, plate_patterns):
                 area = calculate_area(bbox)
                 score = area * refined_prob
@@ -98,7 +89,6 @@ def recognize_plate_two_pass(image_path):
             else:
                 print(f"    -> REJECTED: Invalid plate format.")
 
-    # (Display and selection logic is the same)
     for name, img in debug_windows:
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
         cv2.imshow(name, img)
