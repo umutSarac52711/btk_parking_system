@@ -1,89 +1,131 @@
 import easyocr
 import cv2
 import numpy as np
+import re
 
-def recognize_plate_easyocr(image_path):
+# (Helper functions get_plate_patterns, calculate_area remain the same)
+def get_plate_patterns():
+    patterns = [ r"^[A-Z0-9]{5,8}$", r"^\d{2}[A-Z]{1,3}\d{2,4}$" ]
+    return patterns
+
+def calculate_area(bounding_box):
+    return cv2.contourArea(np.array(bounding_box, dtype=np.int32))
+
+# --- THE FIX #1: STRONGER VALIDATION LOGIC ---
+def is_valid_plate(text, patterns):
     """
-    This function uses easyocr to find and read a license plate from an image.
+    Checks if a text string matches a regex pattern AND has a mix of letters and digits.
     """
-    # Load the image using OpenCV
+    # Rule 1: Must contain at least one digit and at least one letter.
+    has_digit = any(char.isdigit() for char in text)
+    has_letter = any(char.isalpha() for char in text)
+    if not (has_digit and has_letter) and len(text) > 4: # A short string like "NOV" is fine
+        return False
+
+    # Rule 2: Must match one of our regex patterns.
+    for pattern in patterns:
+        if re.match(pattern, text):
+            return True
+            
+    return False
+
+# --- THE FIX #2: NEW, MORE ROBUST PREPROCESSING ---
+def preprocess_for_ocr(image):
+    """
+    Preprocesses using a Blur -> Otsu Threshold pipeline, which is
+    excellent for separating foreground/background on non-flat surfaces.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply a Gaussian blur to smooth out noise and harsh lighting gradients
+    # from the embossed letters. This is crucial for Otsu's method to work well.
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Use Otsu's Binarization. It automatically determines the best global
+    # threshold value to separate the two main colors in the image.
+    # We invert it to get white text on a black background.
+    _, preprocessed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    return preprocessed
+
+
+def recognize_plate_two_pass(image_path):
+    # This function's structure is mostly the same, just calling the new helpers.
     image = cv2.imread(image_path)
-    if image is None:
-        print(f"Error: Could not read image at '{image_path}'")
-        return None, None
+    if image is None: return
 
-    # --- EASYOCR MAGIC HAPPENS HERE ---
+    print("Initializing EasyOCR reader...")
+    reader = easyocr.Reader(['en'], gpu=False)
 
-    # 1. Initialize the reader.
-    # We specify 'tr' for Turkish and 'en' for English. It will use both.
-    # The 'gpu=False' flag is important if you don't have a CUDA-enabled GPU.
-    # The model is downloaded automatically the first time you run this.
-    print("Initializing EasyOCR reader... (This may take a moment on first run)")
-    reader = easyocr.Reader(['tr', 'en'], gpu=False)
+    print("\n--- Pass 1: Finding all text regions ---")
+    pass1_results = reader.readtext(image, paragraph=False)
+    print(f"  -> Found {len(pass1_results)} regions.")
 
-    # 2. Perform OCR on the image.
-    # The 'detail=1' is the default and gives bounding boxes.
-    # 'paragraph=False' tells it to treat distinct blocks of text as separate.
-    results = reader.readtext(image, paragraph=False)
-    print(f"EasyOCR found {len(results)} text blocks.")
+    plate_patterns = get_plate_patterns()
+    final_candidates = []
+    debug_windows = []
 
-    # --- PROCESS THE RESULTS ---
-    
-    # We will assume the most likely candidate is the one we want.
-    # You could add more logic here later (e.g., check if text matches plate format).
-    if not results:
-        print("No text found.")
-        return image, None
+    print("\n--- Pass 2: Re-scanning and validating each region ---")
+    for i, (bbox, text, prob) in enumerate(pass1_results):
+        print(f"\nProcessing Region #{i+1} ('{text}')")
+        
+        all_points = np.array(bbox, dtype=int)
+        min_x, min_y, max_x, max_y = np.min(all_points[:,0]), np.min(all_points[:,1]), np.max(all_points[:,0]), np.max(all_points[:,1])
+        padding = 5
+        cropped_region = image[max(0, min_y-padding):min(image.shape[0], max_y+padding), max(0, min_x-padding):min(image.shape[1], max_x+padding)]
+        if cropped_region.size == 0: continue
+            
+        preprocessed_crop = preprocess_for_ocr(cropped_region)
+        window_name = f"Region #{i+1} Processed ('{text}')"
+        debug_windows.append((window_name, preprocessed_crop))
 
-    # Let's find the result with the highest confidence score.
-    best_result = max(results, key=lambda r: r[2]) # r[2] is the confidence score
-    
-    plate_text = best_result[1]
-    confidence = best_result[2]
-    bounding_box = best_result[0]
+        pass2_results = reader.readtext(preprocessed_crop, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+        
+        if not pass2_results:
+            print("  -> No text found after preprocessing.")
+            continue
 
-    print(f"Best guess for plate: '{plate_text}' with confidence {confidence:.2f}")
+        for (_, refined_text, refined_prob) in pass2_results:
+            cleaned_text = refined_text.upper().replace(" ", "")
+            print(f"  -> Re-scanned and found: '{cleaned_text}'")
+            
+            # Use our new, stronger validation function
+            if is_valid_plate(cleaned_text, plate_patterns):
+                area = calculate_area(bbox)
+                score = area * refined_prob
+                final_candidates.append({ "text": cleaned_text, "score": score, "bbox": bbox })
+                print(f"    -> ACCEPTED: Valid plate format. Score: {int(score)}")
+            else:
+                print(f"    -> REJECTED: Invalid plate format.")
 
-    # Draw the bounding box and text on the image.
-    display_image = image.copy()
-    
-    # The bounding_box is a list of 4 points [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-    # We need to find the top-left and bottom-right points to draw a simple rectangle.
-    # (Note: easyocr provides all 4 corners, so it can handle rotated text!)
-    top_left = tuple(map(int, bounding_box[0]))
-    bottom_right = tuple(map(int, bounding_box[2]))
-    
-    # For drawing, it's safer to get the min/max of all points in case of rotation
-    all_points = np.array(bounding_box, dtype=int)
-    min_x, min_y = np.min(all_points, axis=0)
-    max_x, max_y = np.max(all_points, axis=0)
+    # (Display and selection logic is the same)
+    for name, img in debug_windows:
+        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+        cv2.imshow(name, img)
 
-    # Draw the rectangle
-    cv2.rectangle(display_image, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
+    if final_candidates:
+        best_candidate = max(final_candidates, key=lambda c: c["score"])
+        plate_text = best_candidate["text"]
+        bounding_box = best_candidate["bbox"]
+        print(f"\n--- FINAL RESULT: SUCCESS ---")
+        print(f"Selected Best Candidate: '{plate_text}' (Score: {int(best_candidate['score'])})")
+        display_image = image.copy()
+        all_points = np.array(bounding_box, dtype=int)
+        min_x, min_y, max_x, max_y = np.min(all_points[:,0]), np.min(all_points[:,1]), np.max(all_points[:,0]), np.max(all_points[:,1])
+        cv2.rectangle(display_image, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
+        cv2.putText(display_image, plate_text, (min_x, min_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+        cv2.namedWindow("Final Result", cv2.WINDOW_NORMAL)
+        cv2.imshow("Final Result", display_image)
+    else:
+        print("\n--- FINAL RESULT: FAILURE ---")
 
-    # Put the recognized text above the rectangle
-    cv2.putText(display_image, plate_text, (min_x, min_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-
-    return display_image, plate_text
+    print("\nPress any key to close all windows.")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 def main():
-    image_path = 'car_image.jpg' # Use a clear image for the best result
-    
-    final_image, plate_text_result = recognize_plate_easyocr(image_path)
-
-    if final_image is not None:
-        if plate_text_result:
-            print(f"\n--- SUCCESS ---")
-            print(f"Recognized Plate Text: {plate_text_result}")
-        else:
-            print("\n--- FAILURE ---")
-            print("Could not recognize a license plate.")
-
-        # Display the final image
-        cv2.namedWindow("EasyOCR Result", cv2.WINDOW_NORMAL)
-        cv2.imshow("EasyOCR Result", final_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    image_path = 'car_image_california.jpg' 
+    recognize_plate_two_pass(image_path)
 
 if __name__ == "__main__":
     main()
