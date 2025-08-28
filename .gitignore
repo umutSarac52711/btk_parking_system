@@ -432,3 +432,5 @@ frontend/.env.local
 # IDE / OS specific
 .vscode/
 .DS_Store
+
+uploads/
