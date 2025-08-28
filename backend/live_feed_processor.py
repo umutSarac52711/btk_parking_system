@@ -1,166 +1,111 @@
-import os
+# backend/live_feed_processor.py
 import cv2
-import numpy as np
-from collections import Counter
 import math
-
-# Import our powerful, refactored recognition engine
-from backend.services import recognition_service
+import time
+from collections import Counter
+from .services import recognition_service
 
 class PlateTracker:
-    """
-    A class to track a single license plate over multiple frames.
-    This implements the "temporal consistency" logic.
-    """
+    # ... (This class is exactly the same as the previous version) ...
     def __init__(self, tracker_id, initial_bbox):
-        self.id = tracker_id
-        self.bbox = initial_bbox
+        self.id = tracker_id; self.bbox = initial_bbox
         self.center_point = self._get_center(initial_bbox)
-        
-        self.observations = []
-        self.frames_since_seen = 0
-        self.consensus_text = None
-        self.confirmed = False
-
+        self.observations = []; self.frames_since_seen = 0
+        self.consensus_text = None; self.confirmed = False
     def _get_center(self, bbox):
         x1, y1, x2, y2 = bbox
         return (int((x1 + x2) / 2), int((y1 + y2) / 2))
-
     def update(self, bbox, ocr_text):
-        """Update the tracker with a new detection."""
-        self.bbox = bbox
-        self.center_point = self._get_center(bbox)
+        self.bbox = bbox; self.center_point = self._get_center(bbox)
         self.frames_since_seen = 0
-        
-        # Only add valid, non-empty OCR readings
-        if ocr_text:
-            self.observations.append(ocr_text)
-            self._update_consensus()
-
+        if ocr_text: self.observations.append(ocr_text); self._update_consensus()
     def _update_consensus(self):
-        """Perform a majority vote to get the most likely plate number."""
-        # We need a minimum number of observations to be confident
-        if len(self.observations) < 5:
-            return
-
-        # Get the most common length of observed plates
-        common_length = Counter(len(plate) for plate in self.observations).most_common(1)[0][0]
-        
-        # Filter for observations of that common length
-        valid_observations = [plate for plate in self.observations if len(plate) == common_length]
-        
-        if not valid_observations:
-            return
-
-        # Perform character-by-character majority vote
-        consensus_chars = []
-        for i in range(common_length):
-            char_votes = Counter(plate[i] for plate in valid_observations)
-            best_char = char_votes.most_common(1)[0][0]
-            consensus_chars.append(best_char)
-            
-        self.consensus_text = "".join(consensus_chars)
-        
-        # If our consensus has been stable for a few observations, confirm it
-        if self.observations[-3:].count(self.consensus_text) >= 2:
-            if not self.confirmed:
-                print(f"[CONFIRMED] Plate Tracker #{self.id}: {self.consensus_text}")
-                # This is where you would call the API to check-in the vehicle
-                # For example: requests.post('http://127.0.0.1:5000/api/checkin', json={'plate_number': self.consensus_text})
+        if len(self.observations) < 5: return
+        try:
+            common_length = Counter(len(plate) for plate in self.observations).most_common(1)[0][0]
+            valid_obs = [p for p in self.observations if len(p) == common_length]
+            if not valid_obs: return
+            consensus = "".join([Counter(chars).most_common(1)[0][0] for chars in zip(*valid_obs)])
+            self.consensus_text = consensus
+            if self.observations[-3:].count(self.consensus_text) >= 2 and not self.confirmed:
                 self.confirmed = True
+        except IndexError: pass # Handles cases with no valid observations
 
+class LiveFeedProcessor:
+    def __init__(self, video_source, socketio_instance, app_context):
+        self.video_source = video_source
+        self.socketio = socketio_instance
+        self.app_context = app_context
+        self.trackers = {}
+        self.next_tracker_id = 0
 
-def main():
-    # --- Configuration ---
-    # Change this to a video file path or a camera index (e.g., 0 for webcam)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    video_source = os.path.join(script_dir, 'test_video.mp4')
-
-    cap = cv2.VideoCapture(video_source)
-    if not cap.isOpened():
-        print(f"Error: Could not open video source '{video_source}'")
-        return
-
-    trackers = {}
-    next_tracker_id = 0
-    
-    # --- Main Processing Loop ---
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("End of video stream.")
-            break
-
-        # --- Detection Phase ---
-        # We run our powerful recognition service on the current frame
+    def _process_frame(self, frame):
+        # --- Detection, Tracking, and Cleanup Logic (from previous main loop) ---
         detections = recognition_service.recognize_plate_from_image(frame)
-        
-        # --- Tracking Phase ---
         matched_tracker_ids = set()
-
-        # Match new detections to existing trackers
         for det in detections:
             det_center = (int((det['bbox'][0] + det['bbox'][2]) / 2), int((det['bbox'][1] + det['bbox'][3]) / 2))
-            
-            best_match_id = None
-            min_distance = 100 # Max distance to be considered a match
-
-            for tracker_id, tracker in trackers.items():
-                distance = math.sqrt((tracker.center_point[0] - det_center[0])**2 + (tracker.center_point[1] - det_center[1])**2)
-                if distance < min_distance:
-                    min_distance = distance
-                    best_match_id = tracker_id
+            best_match_id, min_distance = None, 150
+            for tracker_id, tracker in self.trackers.items():
+                distance = math.dist(tracker.center_point, det_center)
+                if distance < min_distance: min_distance, best_match_id = distance, tracker_id
             
             if best_match_id is not None:
-                trackers[best_match_id].update(det['bbox'], det['text'])
+                self.trackers[best_match_id].update(det['bbox'], det['text'])
                 matched_tracker_ids.add(best_match_id)
             else:
-                # This is a new, untracked plate
-                trackers[next_tracker_id] = PlateTracker(next_tracker_id, det['bbox'])
-                trackers[next_tracker_id].update(det['bbox'], det['text'])
-                matched_tracker_ids.add(next_tracker_id)
-                next_tracker_id += 1
+                new_tracker = PlateTracker(self.next_tracker_id, det['bbox'])
+                new_tracker.update(det['bbox'], det['text'])
+                self.trackers[self.next_tracker_id] = new_tracker
+                matched_tracker_ids.add(self.next_tracker_id)
+                self.next_tracker_id += 1
         
-        # --- Cleanup Phase ---
         lost_trackers = []
-        for tracker_id, tracker in trackers.items():
-            if tracker_id not in matched_tracker_ids:
-                tracker.frames_since_seen += 1
+        for tracker_id, tracker in self.trackers.items():
+            if tracker_id not in matched_tracker_ids: tracker.frames_since_seen += 1
+            if tracker.frames_since_seen > 15: lost_trackers.append(tracker_id)
             
-            # If a tracker is lost for too long, remove it
-            if tracker.frames_since_seen > 10:
+            # --- EMIT EVENT ON CONFIRMATION ---
+            if tracker.confirmed and tracker.consensus_text:
+                print(f"[EVENT] Emitting plate_confirmed: {tracker.consensus_text}")
+                with self.app_context: # Use app context for database operations
+                    from . import database
+                    database.check_in_vehicle(tracker.consensus_text)
+                    self.socketio.emit('plate_confirmed', {'plate_number': tracker.consensus_text})
+                # Remove tracker after confirmation to prevent re-triggering
                 lost_trackers.append(tracker_id)
-        
-        for tracker_id in lost_trackers:
-            print(f"[LOST] Plate Tracker #{trackers[tracker_id].id} (Last seen text: {trackers[tracker_id].consensus_text})")
-            del trackers[tracker_id]
 
-        # --- Visualization ---
-        display_frame = frame.copy()
-        for tracker_id, tracker in trackers.items():
-            color = (0, 255, 255) # Yellow for "tracking"
-            if tracker.confirmed:
-                color = (0, 255, 0) # Green for "confirmed"
-            
-            x1, y1, x2, y2 = tracker.bbox
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
-            
-            display_text = f"ID: {tracker.id}"
-            if tracker.consensus_text:
-                display_text = f"{tracker.consensus_text} (ID: {tracker.id})"
-                
-            cv2.putText(display_frame, display_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-            
-        cv2.imshow('Live Feed Processor', display_frame)
+        for tracker_id in lost_trackers: del self.trackers[tracker_id]
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    def generate_annotated_feed(self):
+        """Generator for the MJPEG video stream."""
+        cap = cv2.VideoCapture(self.video_source)
+        while True:
+            success, frame = cap.read()
+            if not success: time.sleep(0.1); continue
             
-    cap.release()
-    cv2.destroyAllWindows()
+            # Draw trackers on the frame for visualization
+            for tracker in self.trackers.values():
+                color = (0, 255, 0) if tracker.confirmed else (0, 255, 255)
+                x1, y1, x2, y2 = tracker.bbox
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                text = f"ID:{tracker.id}"
+                if tracker.consensus_text: text = f"{tracker.consensus_text} (ID:{tracker.id})"
+                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            self.socketio.sleep(0.05) # Yield control to other tasks
 
-if __name__ == '__main__':
-    # You will need a test video file in your backend folder named 'test_video.mp4'
-    # Or change the video_source to 0 to use your webcam.
-    main()
+    def run_processor_in_background(self):
+        """The main loop for processing frames without visualization."""
+        cap = cv2.VideoCapture(self.video_source)
+        while True:
+            success, frame = cap.read()
+            if not success:
+                # If video ends, reset to the beginning to loop it
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            self._process_frame(frame)
+            self.socketio.sleep(0.1) # Process roughly 10 FPS

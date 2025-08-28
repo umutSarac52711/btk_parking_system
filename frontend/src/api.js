@@ -36,18 +36,37 @@ export const checkInVehicle = async (imageFile) => {
  * Checks out a vehicle by its plate number.
  * @param {string} plateNumber - The license plate number to check out.
  */
-export const checkOutVehicle = async (plateNumber) => {
-  const response = await fetch(`${API_BASE_URL}/checkout`, {
+export const checkInVehicleByImage = async (imageFile) => {
+  const formData = new FormData();
+  formData.append('image', imageFile);
+
+  const response = await fetch(`${API_BASE_URL}/checkin/image`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || 'Image check-in failed.');
+  }
+  return response.json();
+};
+
+// --- NEW FUNCTION ---
+/**
+ * Checks in a vehicle by manually providing the plate number.
+ * @param {string} plateNumber - The license plate number to check in.
+ */
+export const checkInVehicleManually = async (plateNumber) => {
+  const response = await fetch(`${API_BASE_URL}/checkin/manual`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ plate_number: plateNumber }),
   });
 
   if (!response.ok) {
     const errorData = await response.json();
-    throw new Error(errorData.error || 'Check-out failed.');
+    throw new Error(errorData.error || 'Manual check-in failed.');
   }
   return response.json();
 };
