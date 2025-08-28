@@ -4,7 +4,7 @@ import math
 import time
 import base64
 import requests
-from threading import Event
+from threading import Event, Lock
 from collections import Counter
 from .services import recognition_service
 
@@ -40,17 +40,26 @@ class PlateTracker:
             print(f"API call exception for {plate}: {e}")
 
 class LiveFeedProcessor:
-    """Manages an on-demand video processing session for a single client."""
+    """Manages an on-demand video processing session using a multi-threaded producer-consumer model."""
     def __init__(self, video_source, socketio_instance, sid):
         self.video_source = video_source
         self.socketio = socketio_instance
-        self.sid = sid # Now the processor knows which client it belongs to
+        self.sid = sid
+        
+        # --- Shared State ---
         self.trackers = {}
+        # --- THE FIX: Initialize the tracker ID counter ---
         self.next_tracker_id = 0
+        self.last_processed_frame_num = -1
+        
+        # --- Threading Control ---
+        self.lock = Lock()
         self._stop_event = Event()
+        self.recognition_thread = None
+        self.streaming_thread = None
 
     def stop(self):
-        print(f"Stopping processor for source: {self.video_source}")
+        print(f"[CONTROL] Stop signal received for session: {self.sid}")
         self._stop_event.set()
 
     def _manage_trackers(self, detections):
@@ -77,68 +86,73 @@ class LiveFeedProcessor:
                 lost_ids.append(tracker_id)
         for tid in lost_ids: del self.trackers[tid]
 
-    def run_recognition_loop(self):
-        """The main processing loop that runs in a background thread until stopped."""
+    def _recognition_loop(self):
+        """PRODUCER THREAD: Runs heavy recognition at a slower pace."""
+        print(f"[{self.sid}] Recognition thread started.")
         cap = cv2.VideoCapture(self.video_source)
+        frame_num = 0
         while not self._stop_event.is_set():
             success, frame = cap.read()
             if not success:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
+            # --- DEBUG LOG ---
+            print(f"[{self.sid}] Recognition Loop: Processing frame #{frame_num}")
             
             detections = recognition_service.recognize_plate_from_image(frame)
-            self._manage_trackers(detections)
-            self.socketio.sleep(0.1)
+            
+            # Use the lock to safely update the shared trackers dictionary
+            with self.lock:
+                self._manage_trackers(detections)
+                self.last_processed_frame_num = frame_num
+                
+            frame_num += 1
+            self.socketio.sleep(0.1) # Aim for ~10 FPS recognition
         
         cap.release()
-        print(f"Recognition loop stopped for {self.video_source}")
+        print(f"[{self.sid}] Recognition thread stopped.")
 
-    def stream_annotated_frames(self):
-        """Generates annotated frames and pushes them to the client via WebSocket."""
+    def _streaming_loop(self):
+        """CONSUMER THREAD: Streams annotated frames at a high, consistent FPS."""
+        print(f"[{self.sid}] Streaming thread started.")
         cap = cv2.VideoCapture(self.video_source)
+        frame_num = 0
         while not self._stop_event.is_set():
             success, frame = cap.read()
             if not success:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
-
-            for tracker in self.trackers.values():
-                # ... (drawing logic is the same) ...
-                color = (0, 255, 0) if tracker.has_fired_event else (0, 255, 255)
-                x1, y1, x2, y2 = tracker.bbox
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                text = f"ID:{tracker.id}"
-                if tracker.consensus_text: text = f"{tracker.consensus_text} (ID:{tracker.id})"
-                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
+            # --- DEBUG LOG ---
+            # Check if the recognition is keeping up with the stream
+            if frame_num % 30 == 0: # Print every second
+                with self.lock:
+                    rec_frame = self.last_processed_frame_num
+                print(f"[{self.sid}] Streaming Loop: On frame #{frame_num}, last processed frame was #{rec_frame}")
+            
+            # Use the lock to safely read the shared trackers dictionary
+            with self.lock:
+                # Draw annotations based on the latest data from the other thread
+                for tracker in self.trackers.values():
+                    color = (0, 255, 0) if tracker.has_fired_event else (0, 255, 255)
+                    x1, y1, x2, y2 = tracker.bbox
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    text = f"ID:{tracker.id}"
+                    if tracker.consensus_text: text = f"{tracker.consensus_text} (ID:{tracker.id})"
+                    cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
             _, buffer = cv2.imencode('.jpg', frame)
-            # Encode the frame as a Base64 string
             frame_b64 = base64.b64encode(buffer).decode('utf-8')
-            
-            # Emit the frame directly to the specific client
             self.socketio.emit('video_frame', {'frame': frame_b64}, to=self.sid)
-            self.socketio.sleep(0.03) # ~30 FPS
+            
+            frame_num += 1
+            self.socketio.sleep(0.033) # Aim for ~30 FPS streaming
         
         cap.release()
-        print(f"Annotated stream stopped for {self.sid}")
+        print(f"[{self.sid}] Streaming thread stopped.")
 
-    #def generate_annotated_feed_bytes(self):
-    #    """Generator for the MJPEG video stream."""
-    #    cap = cv2.VideoCapture(self.video_source)
-    #    while not self._stop_event.is_set():
-    #        success, frame = cap.read()
-    #        if not success:
-    #            cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
-    #
-    #        for tracker in self.trackers.values():
-    #            color = (0, 255, 0) if tracker.has_fired_event else (0, 255, 255)
-    #            x1, y1, x2, y2 = tracker.bbox
-    #            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    #            text = f"ID:{tracker.id}"
-    #            if tracker.consensus_text: text = f"{tracker.consensus_text} (ID:{tracker.id})"
-    #            cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-    #
-    #        _, buffer = cv2.imencode('.jpg', frame)
-    #        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-    #        self.socketio.sleep(0.03)
-    #    
-    #    cap.release()
-    #    print(f"Annotated feed stopped for {self.video_source}")
+    def run(self):
+        """Starts both the recognition and streaming threads."""
+        self.recognition_thread = self.socketio.start_background_task(target=self._recognition_loop)
+        self.streaming_thread = self.socketio.start_background_task(target=self._streaming_loop)
