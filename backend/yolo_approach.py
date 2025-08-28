@@ -17,17 +17,26 @@ except Exception as e:
     yolo_model = None
     ocr_model = None
 
-# --- THE FIX: NEW PREPROCESSING FUNCTION ---
+# --- THE FINAL, BEST PREPROCESSING FUNCTION ---
 def preprocess_for_specialist_ocr(plate_image):
     """
-    Prepares a cropped license plate for the specialist OCR model by
-    resizing it to the exact dimensions the model requires (128x64).
+    Prepares a plate by enhancing contrast with CLAHE and resizing
+    to the exact format required by the specialist OCR model.
     """
-    # The model expects a fixed size of 128x64 pixels and a color image.
-    target_size = (128, 64) # (Width, Height)
+    # 1. Convert to grayscale to perform contrast enhancement
+    gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
     
-    # We resize the original color crop, ignoring the aspect ratio.
-    resized_plate = cv2.resize(plate_image, target_size, interpolation=cv2.INTER_AREA)
+    # 2. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced_gray = clahe.apply(gray)
+    
+    # 3. Convert the enhanced grayscale back to a 3-channel BGR image
+    # The model expects 3 channels, even if they are identical.
+    enhanced_bgr = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+    
+    # 4. Resize to the model's required input size (128x64)
+    target_size = (128, 64) # (Width, Height)
+    resized_plate = cv2.resize(enhanced_bgr, target_size, interpolation=cv2.INTER_AREA)
     
     return resized_plate
 
@@ -49,18 +58,20 @@ def recognize_plate(image_path, debug=False, display_windows=False):
         cropped_plate = image[y1:y2, x1:x2]
         if cropped_plate.size == 0: continue
 
-        # We now use our new, correct preprocessing function
+        # Use our new, advanced preprocessing function
         preprocessed_for_ocr = preprocess_for_specialist_ocr(cropped_plate)
         
         if debug:
             debug_windows["1_Preprocessed_for_OCR"] = preprocessed_for_ocr
 
-        # The OCR model now receives the exact input format it was trained on
         ocr_results = ocr_model.run(preprocessed_for_ocr)
 
         if ocr_results:
-            plate_text = ocr_results[0]
-            print(f"  -> Found: '{plate_text}'")
+            # Clean the output to remove padding characters like '_'
+            raw_text = ocr_results[0]
+            plate_text = "".join(filter(str.isalnum, raw_text))
+            
+            print(f"  -> Raw OCR: '{raw_text}' -> Cleaned: '{plate_text}'")
             detections.append({
                 "text": plate_text,
                 "confidence": yolo_confidence,
@@ -68,7 +79,6 @@ def recognize_plate(image_path, debug=False, display_windows=False):
             })
 
     if not detections:
-        print("YOLO found plates, but the specialist OCR could not read text.")
         return image, None
 
     best_detection = max(detections, key=lambda d: d['confidence'])
@@ -85,7 +95,7 @@ def recognize_plate(image_path, debug=False, display_windows=False):
                 cv2.imshow(name, img)
         cv2.namedWindow("Final Result", cv2.WINDOW_NORMAL)
         cv2.imshow("Final Result", final_image)
-        print("\nPress any key in a window to close all.")
+        print("\nPress any key to close all windows.")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     
@@ -94,11 +104,9 @@ def recognize_plate(image_path, debug=False, display_windows=False):
 
 # Main block for direct, interactive testing
 if __name__ == "__main__":
-    image_path = 'car_image_california.jpg' 
-    final_image, result = recognize_plate(image_path, debug=True, display_windows=True)
-
-    if result:
-        print(f"\n--- SUCCESS ---")
-        print(f"Recognized Plate Text: {result['text']}")
-    else:
-        print("\n--- FAILURE ---")
+    # Test with both challenging images
+    print("--- Testing California Plate ---")
+    recognize_plate('car_image_california.jpg', debug=True, display_windows=True)
+    
+    print("\n\n--- Testing German Plate ---")
+    recognize_plate('dataset/car license plate close up/image_13.jpg', debug=True, display_windows=True)
