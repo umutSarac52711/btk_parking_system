@@ -1,0 +1,33 @@
+/* frontend/src/DiagnosticsView.css */
+.diagnostics-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.diagnostics-controls form {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.control-divider {
+  font-weight: bold;
+  color: #888;
+}
+
+.button-group {
+    display: flex;
+    gap: 1rem;
+}
+
+.stop-button {
+  background-color: #5d2f2f;
+  border-color: #8c4a4a;
+}
+
+.stop-button:hover {
+  border-color: #ff6b6b;
+}

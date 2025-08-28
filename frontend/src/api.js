@@ -67,7 +67,6 @@ export const checkInVehicleManually = async (plateNumber) => {
   return response.json();
 };
 
-// --- NEW API FUNCTION FOR DIAGNOSTICS ---
 /**
  * Uploads a video file to set as the new diagnostic video source.
  */
@@ -83,6 +82,36 @@ export const setDiagnosticVideoSource = async (videoFile) => {
   if (!response.ok) {
     const errorData = await response.json();
     throw new Error(errorData.error || 'Failed to set diagnostic video source.');
+  }
+  return response.json();
+};
+
+// --- NEW API FUNCTIONS FOR FEED CONTROL ---
+
+/**
+ * Sends a request to start the live feed using the default webcam.
+ */
+export const startWebcamFeed = async () => {
+  const response = await fetch(`${API_BASE_URL}/diagnostics/start_webcam`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || 'Failed to start webcam feed.');
+  }
+  return response.json();
+};
+
+/**
+ * Sends a request to stop the currently running video feed processor.
+ */
+export const stopVideoFeed = async () => {
+  const response = await fetch(`${API_BASE_URL}/diagnostics/stop_processor`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || 'Failed to stop video feed.');
   }
   return response.json();
 };

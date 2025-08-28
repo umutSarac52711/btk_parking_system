@@ -16,7 +16,7 @@ def calculate_iou(boxA, boxB):
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
 
-# --- The new, intelligent PlateTracker class ---
+# --- The intelligent PlateTracker class (unchanged) ---
 class PlateTracker:
     def __init__(self, tracker_id, initial_bbox):
         self.id = tracker_id; self.bbox = initial_bbox
@@ -47,11 +47,10 @@ class LiveFeedProcessor:
         self.app_context = app_context
         self.active_trackers = {}
         self.next_tracker_id = 0
-        self.cap = None # Will be initialized in the background task
+        self.cap = None
         print(f"[PROCESSOR_INIT] LiveFeedProcessor created for source: '{self.video_source}'")
 
     def _initialize_capture(self):
-        """Initializes the video capture object."""
         try:
             print(f"[PROCESSOR_INIT] Attempting to open video source: {self.video_source}")
             self.cap = cv2.VideoCapture(self.video_source)
@@ -65,34 +64,26 @@ class LiveFeedProcessor:
             self.cap = None
 
     def _process_frame(self, frame):
+        # This entire method remains the same as the previous version
         detections = recognition_service.recognize_plate_from_image(frame)
         matched_tracker_ids = set()
         if not self.active_trackers:
             for det in detections:
-                new_tracker = PlateTracker(self.next_tracker_id, det['bbox'])
-                new_tracker.update(det['bbox'], det['text'])
-                self.active_trackers[self.next_tracker_id] = new_tracker
-                self.next_tracker_id += 1
+                new_tracker = PlateTracker(self.next_tracker_id, det['bbox']); new_tracker.update(det['bbox'], det['text'])
+                self.active_trackers[self.next_tracker_id] = new_tracker; self.next_tracker_id += 1
         else:
-            unmatched_detections = list(range(len(detections)))
-            tracker_ids = list(self.active_trackers.keys())
+            unmatched_detections = list(range(len(detections))); tracker_ids = list(self.active_trackers.keys())
             for tracker_id in tracker_ids:
-                tracker = self.active_trackers[tracker_id]
-                best_match_iou, best_match_idx = 0, -1
+                tracker = self.active_trackers[tracker_id]; best_match_iou, best_match_idx = 0, -1
                 for i, det_idx in enumerate(unmatched_detections):
                     iou = calculate_iou(tracker.bbox, detections[det_idx]['bbox'])
-                    if iou > best_match_iou:
-                        best_match_iou, best_match_idx = iou, i
+                    if iou > best_match_iou: best_match_iou, best_match_idx = iou, i
                 if best_match_iou > 0.5:
-                    det_idx = unmatched_detections.pop(best_match_idx)
-                    det = detections[det_idx]
-                    tracker.update(det['bbox'], det['text'])
-                    matched_tracker_ids.add(tracker_id)
+                    det_idx = unmatched_detections.pop(best_match_idx); det = detections[det_idx]
+                    tracker.update(det['bbox'], det['text']); matched_tracker_ids.add(tracker_id)
             for det_idx in unmatched_detections:
-                det = detections[det_idx]
-                new_tracker = PlateTracker(self.next_tracker_id, det['bbox'])
-                new_tracker.update(det['bbox'], det['text'])
-                self.active_trackers[self.next_tracker_id] = new_tracker
+                det = detections[det_idx]; new_tracker = PlateTracker(self.next_tracker_id, det['bbox'])
+                new_tracker.update(det['bbox'], det['text']); self.active_trackers[self.next_tracker_id] = new_tracker
                 self.next_tracker_id += 1
         for tracker_id, tracker in self.active_trackers.items():
             if tracker_id not in matched_tracker_ids: tracker.frames_since_seen += 1
@@ -105,17 +96,38 @@ class LiveFeedProcessor:
                     self.socketio.emit('plate_confirmed', {'plate_number': tracker.consensus_text})
                 tracker.action_taken = True
         stale_trackers = [tid for tid, t in self.active_trackers.items() if t.frames_since_seen > 15]
-        for tracker_id in stale_trackers:
-            # print(f"[CLEANUP] Removing stale tracker ID: {tracker_id}")
-            del self.active_trackers[tracker_id]
+        for tracker_id in stale_trackers: del self.active_trackers[tracker_id]
+
+    def _flush_remaining_trackers(self):
+        """
+        --- NEW METHOD ---
+        Submits any high-quality, unconfirmed plates after the video ends.
+        """
+        print("[FLUSH] Video stream ended. Flushing remaining high-quality trackers...")
+        flushed_count = 0
+        for tracker_id, tracker in self.active_trackers.items():
+            # Use a more lenient condition for the final flush
+            if not tracker.action_taken and tracker.consensus_text and len(tracker.observations) >= 3:
+                print(f"[FLUSH] Submitting pending plate: {tracker.consensus_text} (ID: {tracker_id})")
+                with self.app_context:
+                    from . import database
+                    database.check_in_vehicle(tracker.consensus_text)
+                    self.socketio.emit('plate_confirmed', {'plate_number': tracker.consensus_text})
+                tracker.action_taken = True # Mark as flushed
+                flushed_count += 1
+        print(f"[FLUSH] Flush complete. Submitted {flushed_count} pending plates.")
+
 
     def generate_annotated_feed(self):
+        # This method remains the same as the previous version
         if not self.cap or not self.cap.isOpened():
             print("[FEED_GEN] Cannot generate feed, video capture is not available.")
             return
         while True:
             success, frame = self.cap.read()
-            if not success: time.sleep(0.1); continue
+            if not success:
+                print("[FEED_GEN] Video source ended or became unavailable.")
+                break # --- MODIFIED --- Exit the loop instead of continuing
             for tracker in self.active_trackers.values():
                 x1, y1, x2, y2 = [int(c) for c in tracker.bbox]
                 color = (0, 255, 0) if tracker.action_taken else (0, 255, 255)
@@ -141,11 +153,15 @@ class LiveFeedProcessor:
             try:
                 success, frame = self.cap.read()
                 if not success:
-                    print("[PROCESSOR_LOOP] Video ended. Rewinding.")
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
+                    # --- MODIFIED --- Video ended, break the loop
+                    print("[PROCESSOR_LOOP] Video source has ended.")
+                    break
                 self._process_frame(frame)
                 self.socketio.sleep(0.1)
             except Exception as e:
                 print(f"[ERROR] An exception occurred in the main processing loop: {e}")
-                time.sleep(1) # Prevent rapid-fire error loops
+                time.sleep(1)
+        
+        # --- NEW --- Call the flush method after the loop finishes
+        self._flush_remaining_trackers()
+        print("[BACKGROUND_TASK] Background processor loop has finished.")
