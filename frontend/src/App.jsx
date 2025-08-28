@@ -4,7 +4,7 @@ import io from 'socket.io-client';
 import { getParkedCars } from './api';
 import ParkedCarsList from './ParkedCarsList';
 import CheckInForm from './CheckInForm';
-import LiveFeed from './LiveFeed';
+import DiagnosticsView from './DiagnosticsView'; // Import the new component
 import './App.css';
 
 // Initialize the socket connection
@@ -65,7 +65,7 @@ function App() {
             )}
           </div>
           <div className="right-column">
-            <LiveFeed />
+            <DiagnosticsView /> {/* Replace LiveFeed with DiagnosticsView */}
           </div>
         </div>
       </main>

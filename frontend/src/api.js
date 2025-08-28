@@ -4,7 +4,6 @@ const API_BASE_URL = 'http://127.0.0.1:5000/api';
 /**
  * Fetches the list of currently parked cars.
  */
-// --- FIX: Add the 'export' keyword back ---
 export const getParkedCars = async () => {
   const response = await fetch(`${API_BASE_URL}/parked_cars`);
   if (!response.ok) {
@@ -35,7 +34,6 @@ export const checkInVehicleByImage = async (imageFile) => {
 /**
  * Checks out a vehicle by its plate number.
  */
-// --- FIX: Add the 'export' keyword back ---
 export const checkOutVehicle = async (plateNumber) => {
   const response = await fetch(`${API_BASE_URL}/checkout`, {
     method: 'POST',
@@ -65,6 +63,26 @@ export const checkInVehicleManually = async (plateNumber) => {
   if (!response.ok) {
     const errorData = await response.json();
     throw new Error(errorData.error || 'Manual check-in failed.');
+  }
+  return response.json();
+};
+
+// --- NEW API FUNCTION FOR DIAGNOSTICS ---
+/**
+ * Uploads a video file to set as the new diagnostic video source.
+ */
+export const setDiagnosticVideoSource = async (videoFile) => {
+  const formData = new FormData();
+  formData.append('video', videoFile);
+
+  const response = await fetch(`${API_BASE_URL}/diagnostics/set_video_source`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || 'Failed to set diagnostic video source.');
   }
   return response.json();
 };
