@@ -3,7 +3,7 @@
 import os
 import csv
 # Make sure to import from your final, working script
-from yolo_approach import recognize_plate_yolo
+from yolo_approach import recognize_plate
 
 # --- Configuration ---
 # Point this to the folder where your dataset was downloaded
@@ -27,7 +27,7 @@ with open(output_csv_file, 'w', newline='', encoding='utf-8') as csvfile:
 
                 try:
                     # Call the recognition function with the UI turned OFF
-                    final_image, best_detection = recognize_plate_yolo(image_path, debug=False, display_windows=False)
+                    final_image, best_detection = recognize_plate(image_path, debug=False, display_windows=False)
                     
                     if best_detection:
                         # If a detection was returned, extract its data

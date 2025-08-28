@@ -67,7 +67,7 @@ def checkin():
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
 
-    _, recognized_info = recognize_plate_yolo(filepath, debug=False, display_windows=False)
+    _, recognized_info = recognize_plate(filepath, debug=False, display_windows=False)
     os.remove(filepath)
     
     if not recognized_info or not recognized_info['text']:
