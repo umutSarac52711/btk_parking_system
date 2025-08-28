@@ -418,3 +418,17 @@ FodyWeavers.xsd
 *.msp
 /venv
 /dataset
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node / React
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# IDE / OS specific
+.vscode/
+.DS_Store
