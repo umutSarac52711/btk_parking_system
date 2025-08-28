@@ -1,44 +1,67 @@
 # backend/app.py
-from flask import Flask
+from flask import Flask, request, Response
 from flask_cors import CORS
-from flasgger import Swagger
 from flask_socketio import SocketIO
-from .api_routes import api
+from .api_routes import api, VIDEO_FOLDER
 from . import database
 from .live_feed_processor import LiveFeedProcessor
 import os
 
-# --- Configuration ---
-# Define video source here. Use 0 for webcam or a path to a video file.
-VIDEO_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_video.mp4')
-
 # --- App Initialization ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-very-secret-key' # Change this
-CORS(app, resources={r"/api/*": {}, r"/socket.io/*": {}})
-Swagger(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SECRET_KEY'] = 'your-very-secret-key'
+CORS(app, resources={r"/*": {}})
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- Register Blueprints ---
 app.register_blueprint(api)
 
-# --- Background Task Management ---
-# Create a global instance of our processor
-# This is a bit of a shortcut for a demo; in a production app, you'd use a more robust task queue.
-api.video_processor = LiveFeedProcessor(VIDEO_SOURCE, socketio, app.app_context())
+# --- Session and Processor Management ---
+active_processors = {} # Maps a client's SID to their LiveFeedProcessor instance
 
+# --- WebSocket Event Handlers ---
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected to WebSocket')
+    print(f"Client connected: {request.sid}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    print(f"Client disconnected: {request.sid}")
+    # Clean up the processor if the user disconnects
+    if request.sid in active_processors:
+        active_processors[request.sid].stop()
+        del active_processors[request.sid]
+        print(f"Processor for {request.sid} stopped and cleaned up.")
+
+@socketio.on('start_processing')
+def handle_start_processing(data):
+    sid = request.sid
+    if sid in active_processors: active_processors[sid].stop()
+
+    source_type = data.get('source')
+    video_source = 0 if source_type == 'webcam' else os.path.join(VIDEO_FOLDER, data.get('filename', ''))
+
+    if video_source is not None:
+        processor = LiveFeedProcessor(video_source, socketio, sid)
+        active_processors[sid] = processor
+        # Start BOTH loops in parallel background tasks
+        socketio.start_background_task(target=processor.run_recognition_loop)
+        socketio.start_background_task(target=processor.stream_annotated_frames)
+        print(f"Processor started for {sid}")
+    else:
+        socketio.emit('error', {'message': 'Invalid source'}, to=sid)
+
+@socketio.on('stop_processing')
+def handle_stop_processing():
+    sid = request.sid
+    if sid in active_processors:
+        active_processors[sid].stop()
+        del active_processors[sid]
+        print(f"Processor for {sid} stopped by client request.")
+        socketio.emit('stream_stopped', to=sid)
+
 
 # --- Main Entry Point ---
 if __name__ == '__main__':
     database.create_tables()
-    # Start the live feed processor in a background thread
-    socketio.start_background_task(target=api.video_processor.run_processor_in_background)
-    # Run the Flask-SocketIO server
     socketio.run(app, debug=True, port=5000, use_reloader=False)

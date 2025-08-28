@@ -1,16 +1,25 @@
-# backend/api_routes.py
-from flask import Blueprint, jsonify, request, Response
-import os
-import cv2
+from flask import Blueprint, jsonify, request, Response, send_from_directory
+import os, cv2
 from werkzeug.utils import secure_filename
 from . import database
 from .services import recognition_service
 
 api = Blueprint('api', __name__)
 UPLOAD_FOLDER = 'uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+VIDEO_FOLDER = os.path.join(UPLOAD_FOLDER, 'videos')
 ANNOTATED_FOLDER = os.path.join(UPLOAD_FOLDER, 'annotated')
+os.makedirs(VIDEO_FOLDER, exist_ok=True)
 os.makedirs(ANNOTATED_FOLDER, exist_ok=True)
+
+@api.route('/api/upload_video', methods=['POST'])
+def upload_video():
+    if 'video' not in request.files: return jsonify({"error": "No video file"}), 400
+    file = request.files['video']
+    if file.filename == '': return jsonify({"error": "No selected file"}), 400
+    filename = secure_filename(file.filename)
+    filepath = os.path.join(VIDEO_FOLDER, filename)
+    file.save(filepath)
+    return jsonify({"message": "Upload successful", "filename": filename})
 
 
 @api.route('/api/checkin/image', methods=['POST'])
@@ -76,9 +85,9 @@ video_processor = None
 @api.route('/api/video_feed')
 def video_feed():
     if video_processor:
-        return Response(video_processor.generate_annotated_feed(), 
+        return Response(video_processor.generate_annotated_feed_bytes(), 
                         mimetype='multipart/x-mixed-replace; boundary=frame')
-    return "Video processor not running.", 503
+    return "Video processor is not running.", 503
 
 
 # ... (The other routes: parked_cars, history, checkout are the same) ...

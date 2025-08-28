@@ -68,3 +68,18 @@ export const checkInVehicleManually = async (plateNumber) => {
   }
   return response.json();
 };
+
+export const uploadVideoFile = async (videoFile) => {
+  const formData = new FormData();
+  formData.append('video', videoFile);
+  
+  const response = await fetch(`${API_BASE_URL}/upload_video`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error('Video upload failed.');
+  }
+  return response.json();
+};

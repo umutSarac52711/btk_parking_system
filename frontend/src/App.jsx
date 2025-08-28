@@ -16,6 +16,9 @@ function App() {
   const [error, setError] = useState(null);
   const [lastEvent, setLastEvent] = useState(null);
 
+  const [sid, setSid] = useState(null); // Store this client's unique session ID
+
+
   const fetchAndSetCars = useCallback(async () => {
     try {
       setError(null);
@@ -32,6 +35,11 @@ function App() {
   useEffect(() => {
     // Initial fetch
     fetchAndSetCars();
+
+    socket.on('connect', () => {
+      console.log('Connected to WebSocket with SID:', socket.id);
+      setSid(socket.id); // Save our unique ID from the server
+    });
 
     // Set up WebSocket event listener
     socket.on('plate_confirmed', (data) => {
@@ -65,7 +73,7 @@ function App() {
             )}
           </div>
           <div className="right-column">
-            <LiveFeed />
+            {sid && <LiveFeed socket={socket} sid={sid} />}
           </div>
         </div>
       </main>
