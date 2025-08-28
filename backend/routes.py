@@ -3,7 +3,7 @@ from flask import Blueprint, jsonify, request
 import os
 from werkzeug.utils import secure_filename
 from . import database
-from .yolo_approach import recognize_plate_yolo
+from .yolo_approach import recognize_plate
 
 api = Blueprint('api', __name__)
 UPLOAD_FOLDER = 'uploads'
