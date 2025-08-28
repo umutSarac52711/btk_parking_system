@@ -1,4 +1,3 @@
-# backend/app.py
 from flask import Flask
 from flask_cors import CORS
 from flasgger import Swagger # <-- IMPORT THIS

@@ -1,159 +1,219 @@
 # backend/yolo_approach.py
 from ultralytics import YOLO
 import cv2
-import pytesseract
+import torch
 import numpy as np
+from PIL import Image
+import traceback
+import sys
+import os
+
+# --- LPRNET INTEGRATION ---
+script_dir = os.path.dirname(os.path.abspath(__file__))
+lprnet_path = os.path.join(script_dir, 'LPRNet_Pytorch')
+if not os.path.isdir(lprnet_path):
+    raise FileNotFoundError(f"LPRNet directory not found at {lprnet_path}")
+if lprnet_path not in sys.path:
+    sys.path.append(lprnet_path)
+
+# --- LPRNET CHARS and DECODE ---
+CHARS = ['京', '沪', '津', '渝', '冀', '晋', '蒙', '辽', '吉', '黑',
+         '苏', '浙', '皖', '闽', '赣', '鲁', '豫', '鄂', '湘', '粤',
+         '桂', '琼', '川', '贵', '云', '藏', '陕', '甘', '青', '宁',
+         '新',
+         '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K',
+         'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V',
+         'W', 'X', 'Y', 'Z', 'I', 'O',
+         '-'
+         ]
+VALID_LPR_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" # For filtering LPRNet output
+
+def lprnet_decode(preds, char_list):
+    preds = preds.cpu().detach().numpy()
+    pred_labels = []
+    for i in range(preds.shape[0]):
+        pred = preds[i, :, :]
+        p = np.argmax(pred, axis=1)
+        pre_c = p[0]
+        if pre_c != len(char_list) - 1:
+             pred_labels.append(char_list[pre_c])
+        for c in p:
+            if pre_c == c or c == len(char_list) - 1:
+                if c == len(char_list) - 1:
+                    pre_c = c
+                continue
+            pred_labels.append(char_list[c])
+            pre_c = c
+    return ["".join(pred_labels)], [1.0]
+
+# --- Model Imports ---
+from fast_plate_ocr import LicensePlateRecognizer
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from model.LPRNet import LPRNet
 
 # --- Configuration ---
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-MODEL_PATH = 'license_plate_detector.pt'
+YOLO_MODEL_PATH = 'license_plate_detector.pt'
+LPRNET_WEIGHTS_PATH = os.path.join(lprnet_path, 'LPRNet_Pytorch_weight.pth')
 
+def load_all_models():
+    try:
+        print("Loading all models...")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        yolo_model = YOLO(YOLO_MODEL_PATH)
+        ocr_model_fast = LicensePlateRecognizer('cct-xs-v1-global-model')
+        
+        trocr_model_id = 'DunnBC22/trocr-base-printed_license_plates_ocr'
+        trocr_processor_id = 'microsoft/trocr-base-printed'
+        trocr_processor = TrOCRProcessor.from_pretrained(trocr_processor_id, use_fast=True)
+        trocr_model = VisionEncoderDecoderModel.from_pretrained(trocr_model_id)
+        trocr_model.to(device).eval()
 
-def recognize_plate(image_path, debug=False, display_windows=False):
-    """
-    Detects and recognizes a license plate from an image using a YOLOv8 model for detection
-    and a Tesseract-based character segmentation pipeline for OCR.
+        lprnet_model = LPRNet(lpr_max_len=8, phase=False, class_num=len(CHARS), dropout_rate=0)
+        lprnet_model.to(device)
+        lprnet_model.load_state_dict(torch.load(LPRNET_WEIGHTS_PATH, map_location=torch.device(device)))
+        lprnet_model.eval()
+        print(f"All models loaded successfully. Running on device '{device}'.")
 
-    Args:
-        image_path (str): Path to the input image.
-        debug (bool): If True, generates data for debug visualizations.
-        display_windows (bool): If True, displays the debug and final result windows.
+        return {
+            "yolo": yolo_model, "fast_ocr": ocr_model_fast,
+            "trocr_processor": trocr_processor, "trocr_model": trocr_model,
+            "lprnet_model": lprnet_model, "device": device
+        }
+        
+    except Exception:
+        print(f"--- FATAL ERROR LOADING MODELS ---")
+        traceback.print_exc()
+        return None
 
-    Returns:
-        tuple: A tuple containing the final annotated image and the best detection result dictionary.
-               Returns (original_image, None) if no plate is successfully recognized.
-    """
-    model = YOLO(MODEL_PATH)
+models = load_all_models()
+
+def preprocess_for_lprnet(image: np.ndarray):
+    image = cv2.resize(image, (94, 24))
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = (np.transpose(np.float32(image), (2, 0, 1)) - 127.5) * 0.0078125
+    return torch.from_numpy(image).unsqueeze(0)
+
+# FIX 2: Create a dedicated preprocessing function for TrOCR
+def preprocess_for_trocr(image: np.ndarray) -> Image.Image:
+    """Applies Grayscale and Contrast Enhancement (CLAHE) to improve TrOCR accuracy."""
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Create a CLAHE object (with optional parameters)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    # Apply CLAHE
+    enhanced_gray = clahe.apply(gray)
+    # Convert back to a PIL Image for the processor
+    return Image.fromarray(enhanced_gray)
+
+def recognize_plate(image_path: str, display_windows: bool = False):
+    if not models: return cv2.imread(image_path), None
     image = cv2.imread(image_path)
-    if image is None:
-        return None, None
+    if image is None: return None, None
 
-    results = model.predict(image)
-    detections = []
-    debug_windows = {}
+    yolo_results = models["yolo"].predict(image, verbose=False)
+    all_plate_detections = []
 
-    # Process each bounding box detected by YOLO
-    for box in results[0].boxes:
+    for box in yolo_results[0].boxes:
         x1, y1, x2, y2 = [int(coord) for coord in box.xyxy[0]]
-        yolo_confidence = box.conf[0]
         cropped_plate = image[y1:y2, x1:x2]
-        if cropped_plate.size == 0:
-            continue
+        if cropped_plate.size == 0: continue
 
-        # --- 1. Preprocessing for Contour Detection ---
-        gray_plate = cv2.cvtColor(cropped_plate, cv2.COLOR_BGR2GRAY)
-
-        # Smartly decide whether to invert the threshold based on border brightness
-        h, w = gray_plate.shape
-        border_pixels = np.concatenate([gray_plate[0, :], gray_plate[h - 1, :], gray_plate[:, 0], gray_plate[:, w - 1]])
-        avg_brightness = np.mean(border_pixels)
-        threshold_mode = cv2.THRESH_BINARY if avg_brightness > 127 else cv2.THRESH_BINARY_INV
-
-        _, thresh_plate = cv2.threshold(gray_plate, 0, 255, threshold_mode + cv2.THRESH_OTSU)
+        candidates = []
         
-        # Dilate to connect fragmented parts of characters
-        kernel = np.ones((3, 3), np.uint8)
-        dilated_plate = cv2.dilate(thresh_plate, kernel, iterations=1)
+        # Expert 1: fast-plate-ocr
+        try:
+            preprocessed_fast = cv2.resize(cropped_plate, (128, 64))
+            fast_results = models["fast_ocr"].run(preprocessed_fast)
+            # FIX 1: Make unpacking more robust.
+            if fast_results and len(fast_results[0]) >= 2:
+                text, conf = fast_results[0][:2] # Take only the first two elements
+                cleaned_text = "".join(c for c in text if c.isalnum()).upper()
+                if cleaned_text:
+                    candidates.append({"text": cleaned_text, "confidence": conf, "source": "FastOCR"})
+        except Exception as e:
+            print(f"FastOCR failed: {e}")
 
-        if debug:
-            debug_windows["1_Preprocessed"] = dilated_plate
+        # Expert 2: TrOCR
+        try:
+            # FIX 2: Use the new preprocessing function for TrOCR's input
+            pil_image = preprocess_for_trocr(cropped_plate)
+            pixel_values = models["trocr_processor"](images=pil_image, return_tensors="pt").pixel_values.to(models["device"])
+            generated_ids = models["trocr_model"].generate(pixel_values, output_scores=True, return_dict_in_generate=True)
+            generated_text = models["trocr_processor"].batch_decode(generated_ids.sequences, skip_special_tokens=True)[0]
+            probs = [torch.softmax(s, dim=-1).max().item() for s in generated_ids.scores]
+            confidence = np.mean(probs) if probs else 0.0
+            cleaned_text = "".join(c for c in generated_text if c.isalnum()).upper()
+            if cleaned_text:
+                candidates.append({"text": cleaned_text, "confidence": float(confidence), "source": "TrOCR"})
+        except Exception as e:
+            print(f"TrOCR failed: {e}")
 
-        # --- 2. Character Segmentation and Clustering ---
-        contours, _ = cv2.findContours(dilated_plate.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Expert 3: LPRNet
+        try:
+            lprnet_input = preprocess_for_lprnet(cropped_plate).to(models["device"])
+            with torch.no_grad():
+                preds = models["lprnet_model"](lprnet_input)
+            
+            probs = torch.softmax(preds, dim=2)
+            max_probs, _ = torch.max(probs, dim=2)
+            decoded_text, _ = lprnet_decode(preds, CHARS)
+            
+            if decoded_text:
+                raw_text = decoded_text[0].replace('-', '')
+                # FIX 3: Post-process to filter out non-alphanumeric characters
+                cleaned_text = "".join(c for c in raw_text if c in VALID_LPR_CHARS)
+                confidence = max_probs[0, :len(cleaned_text)].mean().item() if cleaned_text else 0.0
+                if cleaned_text:
+                     candidates.append({"text": cleaned_text, "confidence": confidence, "source": "LPRNet"})
+        except Exception as e:
+            print(f"LPRNet failed: {e}")
 
-        potential_chars = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            # Initial loose filter for character-like shapes
-            # if h > 30 and 10 < w < 200:
-            #     potential_chars.append({"x": x, "y": y, "w": w, "h": h})
+        if candidates:
+            best_candidate = max(candidates, key=lambda c: c['confidence'])
+            print(f"  -> Ensemble results for a detected plate:")
+            for c in candidates:
+                print(f"    - {c['source']:<8}: '{c['text']}' (Conf: {c['confidence']:.3f})")
+            
+            all_plate_detections.append({
+                "text": best_candidate['text'], "confidence": best_candidate['confidence'],
+                "bbox": (x1, y1, x2, y2)
+            })
 
-            if h > 50 and w > 10: potential_chars.append({"x":x, "y":y, "w":w, "h":h})
-        
-        if not potential_chars:
-            continue
-
-        # Cluster characters into lines based on their vertical position
-        lines = {}
-        for char in potential_chars:
-            line_y = round(char['y'] / 50)  # Group in bands of 50 pixels
-            if line_y not in lines:
-                lines[line_y] = []
-            lines[line_y].append(char)
-        
-        if not lines:
-            continue
-
-        # Assume the main plate number is the line with the most characters
-        best_line = max(lines.values(), key=len)
-        best_line.sort(key=lambda c: c['x']) # Sort characters left-to-right
-
-        if debug:
-            contour_debug_image = cv2.cvtColor(gray_plate, cv2.COLOR_GRAY2BGR)
-            for char in best_line:
-                cv2.rectangle(contour_debug_image, (char['x'], char['y']), (char['x'] + char['w'], char['y'] + char['h']), (0, 255, 0), 2)
-            debug_windows["2_Segmented_Characters"] = contour_debug_image
-
-        # --- 3. Final OCR on the Assembled Character Line ---
-        min_x = min(c['x'] for c in best_line)
-        min_y = min(c['y'] for c in best_line)
-        max_x = max(c['x'] + c['w'] for c in best_line)
-        max_y = max(c['y'] + c['h'] for c in best_line)
-
-        # Crop the entire line of characters from the processed plate
-        line_image = dilated_plate[min_y:max_y, min_x:max_x]
-        
-        # Invert colors for Tesseract and apply a final polish
-        inverted_line = cv2.bitwise_not(line_image)
-        polished_line = cv2.medianBlur(inverted_line, 3)
-        padded_line = cv2.copyMakeBorder(polished_line, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-        
-        if debug:
-            debug_windows["3_Final_OCR_Strip"] = padded_line
-
-        # "Golden Configuration" for Tesseract on license plates
-        custom_config = r'--oem 3 --psm 8 -c load_system_dawg=0 -c load_freq_dawg=0'
-        
-        ocr_text = pytesseract.image_to_string(padded_line, config=custom_config)
-        cleaned_text = "".join(c for c in ocr_text if c.isalnum()).upper()
-        
-        if cleaned_text:
-            detections.append({"text": cleaned_text, "confidence": yolo_confidence, "bbox": (x1, y1, x2, y2)})
-
-    if not detections:
+    if not all_plate_detections:
+        print("No license plates were successfully recognized.")
         return image, None
 
-    # Select the detection with the highest confidence from YOLO
-    best_detection = max(detections, key=lambda d: d['confidence'])
-    
-    # Prepare the final annotated image
+    best_overall_detection = max(all_plate_detections, key=lambda d: d['confidence'])
+    # ... Visualization code remains the same ...
     final_image = image.copy()
-    b = best_detection['bbox']
+    b = best_overall_detection['bbox']
+    text, conf_str = best_overall_detection['text'], f"{best_overall_detection['confidence']:.2f}"
     cv2.rectangle(final_image, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 3)
-    cv2.putText(final_image, best_detection['text'], (b[0], b[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-    
+    cv2.putText(final_image, f"{text} ({conf_str})", (b[0], b[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
     if display_windows:
-        if debug:
-            for name, img in debug_windows.items():
-                cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-                cv2.imshow(name, img)
-        cv2.namedWindow("Final Result", cv2.WINDOW_NORMAL)
-        cv2.imshow("Final Result", final_image)
-        print("\nPress any key in a window to close all.")
+        cv2.namedWindow("Final Result (Ensemble)", cv2.WINDOW_NORMAL)
+        cv2.imshow("Final Result (Ensemble)", final_image)
+        print("\nPress any key to close the image window.")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     
-    return final_image, best_detection
+    return final_image, best_overall_detection
 
-# Main block for direct, interactive testing of this script
+
 if __name__ == "__main__":
-    image_path = 'car_image_california.jpg' # Change this to test different images
-    
-    # Run with full visualization
-    final_image, result = recognize_plate(image_path, debug=True, display_windows=True)
-
-    if result:
-        print(f"\n--- SUCCESS ---")
-        print(f"Recognized Plate Text: {result['text']}")
-    else:
-        print("\n--- FAILURE ---")
+    # Ensure you have an image named 'car_image_california.jpg' in the same directory
+    test_images = ['car_image_california.jpg']
+    for img_path in test_images:
+        if not os.path.exists(img_path):
+            print(f"\n--- SKIPPING: Image not found at '{img_path}' ---")
+            continue
+        print(f"\n--- PROCESSING IMAGE: {img_path} ---")
+        final_image, result = recognize_plate(img_path, display_windows=True)
+        if result:
+            print(f"\n--- SUCCESS ---")
+            print(f"Best Recognized Plate Text: {result['text']}")
+            print(f"Confidence: {result['confidence']:.3f}")
+        else:
+            print("\n--- FAILURE: No plate could be read. ---")
