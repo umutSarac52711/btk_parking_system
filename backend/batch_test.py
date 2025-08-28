@@ -3,7 +3,7 @@
 import os
 import csv
 # Make sure to import from your final, working script
-from yolo_approach import recognize_plate
+from backend.services.recognition_service import recognize_plate
 
 # --- Configuration ---
 # Point this to the folder where your dataset was downloaded
