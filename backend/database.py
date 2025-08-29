@@ -58,8 +58,40 @@ def check_in_vehicle(plate_number):
             # RETURNING id is an efficient way to get the new ID after an insert
             cursor.execute("INSERT INTO vehicles (plate_number) VALUES (%s) RETURNING id;", (plate_number,))
             vehicle_id = cursor.fetchone()['id']
+        
+
+        # Step 2: Verification - If there is a parking log entry that has the same exact license plate and does not have an exit date, that means the car is still parked. 
+        # This is an invalid or a repeated entry
+        cursor.execute("""
+            SELECT id FROM parking_log
+            WHERE vehicle_id = %s AND is_parked = TRUE;
+        """, (vehicle_id,))
+        active_log = cursor.fetchone()
+
+        if active_log:
+            ## If the difference in entry time is minimal (less than 40 seconds), it is a re-entry. Safe to ignore
+            if (datetime.now() - active_log['entry_time']).total_seconds() < 40:
+                print(f"Vehicle {plate_number} is already parked.")
+                return {"error": "Vehicle is already parked."}
+            else:
+                print(f"Vehicle {plate_number} attempted to re-check-in without checking out.")
+                return {"error": "Vehicle is already parked. Please check out before checking in again."}
             
-        # Step 2: Create a new parking log entry
+        # Step 3: Fetch the latest parking log. If it was made within the last 6 seconds, it may be a bugged rapid entry.
+        # Cooldown of 6 seconds is arbitrary for now.
+        cursor.execute("""
+            SELECT id FROM parking_log
+            WHERE is_parked = TRUE
+            ORDER BY entry_time DESC LIMIT 1;
+        """)
+        latest_log = cursor.fetchone()
+
+        if latest_log:
+            if (datetime.now() - latest_log['entry_time']).total_seconds() < 6:
+                print(f"Vehicle {plate_number} is entering too quickly.")
+                return {"error": "Vehicle is entering too quickly."}
+
+        # Finally: Create a new parking log entry
         cursor.execute(
             "INSERT INTO parking_log (vehicle_id) VALUES (%s) RETURNING id, entry_time;",
             (vehicle_id,)
@@ -69,7 +101,7 @@ def check_in_vehicle(plate_number):
         return {"message": "Check-in successful", "log_id": new_log['id'], "entry_time": new_log['entry_time']}
     except Exception as e:
         conn.rollback()
-        print(f"Database error during check-in: {e}")
+        print(f"Database error during check-in: {e}, {e.__class__}")
         return None
     finally:
         cursor.close()
